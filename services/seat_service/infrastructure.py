@@ -1,8 +1,9 @@
+"""
+Seat service infrastructure: Postgres and Redis implementations.
+"""
 from __future__ import annotations
 
 import json
-import pickle
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -11,7 +12,15 @@ from psycopg2 import errors
 import redis
 
 from .application import EventPublisher, KeyValueCache, SeatEvent, SeatRepository
-from .domain import Seat, SeatAlreadyAssigned, SeatAssignment, SeatAssignmentRepository, WaitlistEntry, WaitlistRepository
+from .domain import (
+    Seat,
+    SeatAlreadyAssigned,
+    SeatAssignment,
+    SeatAssignmentRepository,
+    SeatState,
+    WaitlistEntry,
+    WaitlistRepository,
+)
 
 
 # ---------- PostgreSQL-backed repositories ----------
@@ -70,8 +79,6 @@ class PostgresSeatRepository(SeatRepository):
                 confirmed_at,
                 cancelled_at,
             ) = row
-
-            from .domain import SeatState  # local import to avoid circular
 
             state = SeatState[state_str]
             return Seat(
@@ -194,15 +201,54 @@ class PostgresSeatAssignmentRepository(SeatAssignmentRepository):
         self._conn.commit()
 
 
-# ---------- Redis-backed cache, waitlist, and queue ----------
+# ---------- Redis-backed cache, waitlist, and events ----------
+
+
+def _seat_to_dict(seat: Seat) -> dict[str, Any]:
+    return {
+        "flight_id": seat.flight_id,
+        "seat_id": seat.seat_id,
+        "state": seat.state.name,
+        "held_by_passenger_id": seat.held_by_passenger_id,
+        "held_at": seat.held_at.isoformat() if seat.held_at else None,
+        "confirmed_for_passenger_id": seat.confirmed_for_passenger_id,
+        "confirmed_at": seat.confirmed_at.isoformat() if seat.confirmed_at else None,
+        "cancelled_at": seat.cancelled_at.isoformat() if seat.cancelled_at else None,
+    }
+
+
+def _dict_to_seat(data: dict[str, Any]) -> Seat:
+    held_at = data.get("held_at")
+    if held_at:
+        held_at = datetime.fromisoformat(held_at)
+        if held_at.tzinfo is None:
+            held_at = held_at.replace(tzinfo=timezone.utc)
+    confirmed_at = data.get("confirmed_at")
+    if confirmed_at:
+        confirmed_at = datetime.fromisoformat(confirmed_at)
+        if confirmed_at.tzinfo is None:
+            confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
+    cancelled_at = data.get("cancelled_at")
+    if cancelled_at:
+        cancelled_at = datetime.fromisoformat(cancelled_at)
+        if cancelled_at.tzinfo is None:
+            cancelled_at = cancelled_at.replace(tzinfo=timezone.utc)
+    return Seat(
+        flight_id=data["flight_id"],
+        seat_id=data["seat_id"],
+        state=SeatState[data["state"]],
+        held_by_passenger_id=data.get("held_by_passenger_id"),
+        held_at=held_at,
+        confirmed_for_passenger_id=data.get("confirmed_for_passenger_id"),
+        confirmed_at=confirmed_at,
+        cancelled_at=cancelled_at,
+    )
 
 
 class RedisKeyValueCache(KeyValueCache):
     """
-    Redis-backed implementation of KeyValueCache.
-
-    Values are pickled Python objects. For interop with other systems, a more
-    structured serialization (e.g. JSON) would be preferable.
+    Redis-backed cache for Seat objects. Uses JSON serialization (no pickle)
+    for security and interop.
     """
 
     def __init__(self, client: redis.Redis) -> None:
@@ -212,10 +258,16 @@ class RedisKeyValueCache(KeyValueCache):
         raw = self._client.get(key)
         if raw is None:
             return None
-        return pickle.loads(raw)
+        data = json.loads(raw)
+        if isinstance(data, dict) and "flight_id" in data and "seat_id" in data:
+            return _dict_to_seat(data)
+        return data
 
     def set(self, key: str, value: object, ttl_seconds: Optional[int] = None) -> None:
-        data = pickle.dumps(value)
+        if isinstance(value, Seat):
+            data = json.dumps(_seat_to_dict(value))
+        else:
+            data = json.dumps(value)
         if ttl_seconds is None:
             self._client.set(key, data)
         else:
@@ -228,9 +280,6 @@ class RedisKeyValueCache(KeyValueCache):
 class RedisWaitlistRepository(WaitlistRepository):
     """
     Redis-backed waitlist using a FIFO list per (flight_id, seat_id).
-
-    Keys: waitlist:{flight_id}:{seat_id}
-    Values: JSON-encoded WaitlistEntry dictionaries.
     """
 
     def __init__(self, client: redis.Redis) -> None:
@@ -282,9 +331,6 @@ class RedisWaitlistRepository(WaitlistRepository):
 class RedisEventPublisher(EventPublisher):
     """
     Redis-based event publisher using a list as a simple queue.
-
-    Key: events:seat
-    Value: JSON dict with "type" and event fields.
     """
 
     def __init__(self, client: redis.Redis, key: str = "events:seat") -> None:
@@ -292,11 +338,12 @@ class RedisEventPublisher(EventPublisher):
         self._key = key
 
     def publish(self, event: SeatEvent) -> None:
-        payload: dict[str, Any] = {
+        from dataclasses import asdict
+
+        payload = {
             "type": type(event).__name__,
             **asdict(event),
         }
-        # Serialize datetimes to ISO strings for portability.
         for k, v in list(payload.items()):
             if isinstance(v, datetime):
                 payload[k] = v.isoformat()
@@ -304,15 +351,8 @@ class RedisEventPublisher(EventPublisher):
 
 
 def create_redis_client(url: str = "redis://localhost:6379/0") -> redis.Redis:
-    """
-    Helper to create a Redis client from a URL.
-    """
     return redis.from_url(url)
 
 
 def create_postgres_connection(dsn: str) -> psycopg2.extensions.connection:
-    """
-    Helper to create a PostgreSQL connection.
-    """
     return psycopg2.connect(dsn)
-

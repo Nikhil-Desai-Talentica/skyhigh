@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from skyhigh_core.domain import SeatAssignment, SeatAlreadyAssigned, WaitlistAssignmentService
+from services.seat_service.domain import SeatAssignment, SeatAlreadyAssigned, WaitlistAssignmentService
 from .inmemory_impl import InMemorySeatAssignmentRepository, InMemoryWaitlistRepository
 
 

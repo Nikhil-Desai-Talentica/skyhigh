@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from skyhigh_core.application import SkyHighCoreService
-from skyhigh_core.domain import SeatAssignment, SeatLifecycleService, WaitlistAssignmentService
+from services.seat_service.application import SeatOrchestrationService
+from services.seat_service.domain import SeatAssignment, SeatLifecycleService, WaitlistAssignmentService
 from .inmemory_impl import (
     InMemoryEventPublisher,
     InMemoryKeyValueCache,
@@ -15,7 +15,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _make_core_service() -> tuple[SkyHighCoreService, InMemoryEventPublisher]:
+def _make_core_service() -> tuple[SeatOrchestrationService, InMemoryEventPublisher]:
     seat_repo = InMemorySeatRepository()
     assignment_repo = InMemorySeatAssignmentRepository()
     waitlist_repo = InMemoryWaitlistRepository()
@@ -25,7 +25,7 @@ def _make_core_service() -> tuple[SkyHighCoreService, InMemoryEventPublisher]:
     )
     cache = InMemoryKeyValueCache()
     events = InMemoryEventPublisher()
-    core = SkyHighCoreService(
+    core = SeatOrchestrationService(
         seat_repo=seat_repo,
         assignment_repo=assignment_repo,
         waitlist_service=waitlist_service,

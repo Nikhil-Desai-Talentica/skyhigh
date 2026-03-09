@@ -5,11 +5,13 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException
 
-from skyhigh_core.application import SkyHighCoreService
-from skyhigh_core.domain import SeatLifecycleService, WaitlistAssignmentService
-from skyhigh_core.infrastructure import (
+from .application import SeatOrchestrationService
+from .domain import SeatLifecycleService, WaitlistAssignmentService
+from .domain import HoldExpiredException
+from .infrastructure import (
     PostgresSeatAssignmentRepository,
     PostgresSeatRepository,
+    RedisEventPublisher,
     RedisKeyValueCache,
     RedisWaitlistRepository,
     create_postgres_connection,
@@ -19,10 +21,12 @@ from skyhigh_core.infrastructure import (
 app = FastAPI(title="Seat Service")
 
 
-def get_core_service() -> SkyHighCoreService:
-    # In a real setup, these DSNs would come from environment variables.
-    pg_conn = create_postgres_connection("postgres://postgres:postgres@postgres:5432/skyhigh")
-    redis_client = create_redis_client("redis://redis:6379/0")
+def get_seat_service() -> SeatOrchestrationService:
+    import os
+    db_url = os.environ.get("DATABASE_URL", "postgres://postgres:postgres@postgres:5432/skyhigh")
+    redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+    pg_conn = create_postgres_connection(db_url)
+    redis_client = create_redis_client(redis_url)
 
     seat_repo = PostgresSeatRepository(pg_conn)
     assignment_repo = PostgresSeatAssignmentRepository(pg_conn)
@@ -32,15 +36,9 @@ def get_core_service() -> SkyHighCoreService:
         assignment_repo=assignment_repo,
     )
     cache = RedisKeyValueCache(redis_client)
+    events = RedisEventPublisher(redis_client, key="events:seat")
 
-    # Event publishing is left as a future enhancement; pass a no-op lambda for now.
-    class NoOpEvents:
-        def publish(self, event) -> None:  # type: ignore[no-untyped-def]
-            return
-
-    events = NoOpEvents()
-
-    return SkyHighCoreService(
+    return SeatOrchestrationService(
         seat_repo=seat_repo,
         assignment_repo=assignment_repo,
         waitlist_service=waitlist_service,
@@ -50,7 +48,31 @@ def get_core_service() -> SkyHighCoreService:
     )
 
 
-CoreDep = Annotated[SkyHighCoreService, Depends(get_core_service)]
+CoreDep = Annotated[SeatOrchestrationService, Depends(get_seat_service)]
+
+
+@app.get("/seats/{flight_id}/{seat_id}/hold-status")
+def get_hold_status(flight_id: str, seat_id: str, passenger_id: str, core: CoreDep):
+    """Return whether the seat is still held for this passenger (applies expiry logic)."""
+    status = core.get_hold_status(
+        flight_id=flight_id,
+        seat_id=seat_id,
+        passenger_id=passenger_id,
+        now=datetime.now(timezone.utc),
+    )
+    return status
+
+
+@app.post("/seats/{flight_id}/{seat_id}/waitlist")
+def join_waitlist(flight_id: str, seat_id: str, passenger_id: str, core: CoreDep):
+    """Add a passenger to the waitlist for this seat."""
+    entry = core.join_waitlist(
+        flight_id=flight_id,
+        seat_id=seat_id,
+        passenger_id=passenger_id,
+        now=datetime.now(timezone.utc),
+    )
+    return entry
 
 
 @app.post("/seats/{flight_id}/{seat_id}/hold")
@@ -81,6 +103,11 @@ def confirm_seat(flight_id: str, seat_id: str, passenger_id: str, core: CoreDep)
             "seatId": assignment.seat_id,
             "passengerId": assignment.passenger_id,
         }
+    except HoldExpiredException as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -94,4 +121,3 @@ def cancel_seat(flight_id: str, seat_id: str, passenger_id: str, core: CoreDep):
         now=datetime.now(timezone.utc),
     )
     return {"status": "ok"}
-

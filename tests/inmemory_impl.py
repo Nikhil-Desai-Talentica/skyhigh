@@ -1,3 +1,7 @@
+"""
+In-memory implementations for seat service (used by tests).
+Imports from the seat microservice package for cohesion.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -5,8 +9,8 @@ from datetime import datetime
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
-from skyhigh_core.application import EventPublisher, KeyValueCache, SeatEvent, SeatRepository
-from skyhigh_core.domain import (
+from services.seat_service.application import EventPublisher, KeyValueCache, SeatEvent, SeatRepository
+from services.seat_service.domain import (
     Seat,
     SeatAlreadyAssigned,
     SeatAssignment,
@@ -17,10 +21,6 @@ from skyhigh_core.domain import (
 
 
 class InMemoryEventPublisher(EventPublisher):
-    """
-    Simple event collector used for testing and local development.
-    """
-
     def __init__(self) -> None:
         self.events: list[SeatEvent] = []
 
@@ -29,10 +29,6 @@ class InMemoryEventPublisher(EventPublisher):
 
 
 class InMemorySeatRepository(SeatRepository):
-    """
-    In-memory Seat persistence for tests and prototypes.
-    """
-
     def __init__(self) -> None:
         self._seats: dict[tuple[str, str], Seat] = {}
 
@@ -44,10 +40,6 @@ class InMemorySeatRepository(SeatRepository):
 
 
 class InMemoryKeyValueCache(KeyValueCache):
-    """
-    Basic in-memory cache used in tests in place of Redis.
-    """
-
     def __init__(self) -> None:
         self._store: dict[str, object] = {}
 
@@ -62,13 +54,6 @@ class InMemoryKeyValueCache(KeyValueCache):
 
 
 class InMemorySeatAssignmentRepository(SeatAssignmentRepository):
-    """
-    Thread-safe in-memory implementation used for testing and local development.
-
-    This simulates the behavior of a database with a UNIQUE constraint on
-    (flight_id, seat_id) by guarding access with a lock.
-    """
-
     def __init__(self) -> None:
         self._assignments: Dict[Tuple[str, str], SeatAssignment] = {}
         self._lock = Lock()
@@ -119,10 +104,6 @@ class InMemoryWaitlistEntry(WaitlistEntry):
 
 
 class InMemoryWaitlistRepository(WaitlistRepository):
-    """
-    Simple FIFO waitlist per (flight_id, seat_id) for testing and development.
-    """
-
     def __init__(self) -> None:
         self._lists: Dict[Tuple[str, str], List[WaitlistEntry]] = {}
         self._lock = Lock()
@@ -152,4 +133,3 @@ class InMemoryWaitlistRepository(WaitlistRepository):
             if not queue:
                 return None
             return queue.pop(0)
-

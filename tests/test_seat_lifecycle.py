@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from skyhigh_core.domain import (
+from services.seat_service.domain import (
     InvalidSeatTransition,
     Seat,
     SeatLifecycleService,

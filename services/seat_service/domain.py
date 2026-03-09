@@ -1,3 +1,7 @@
+"""
+Seat service domain: seat lifecycle, assignments, waitlist.
+All seat-related domain logic lives in this service for cohesion.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,6 +35,12 @@ class InvalidSeatTransition(Exception):
     """
 
 
+class HoldExpiredException(Exception):
+    """
+    Raised when confirming a seat whose hold window has expired.
+    """
+
+
 class SeatLifecycleService:
     HOLD_TTL_SECONDS: int = 120
 
@@ -50,7 +60,6 @@ class SeatLifecycleService:
         """
         Transition seat from AVAILABLE -> HELD for a specific passenger.
         """
-        # First, automatically release any expired hold.
         self._expire_hold_if_needed(seat, now)
 
         if seat.state is not SeatState.AVAILABLE:
@@ -63,11 +72,16 @@ class SeatLifecycleService:
     def confirm_seat(self, seat: Seat, passenger_id: str, now: datetime) -> None:
         """
         Transition seat from HELD -> CONFIRMED for the same passenger.
+        Raises HoldExpiredException if this passenger's hold had expired.
         """
-        # Expire any stale holds before confirming.
+        was_held_by_this_passenger = (
+            seat.state is SeatState.HELD and seat.held_by_passenger_id == passenger_id
+        )
         self._expire_hold_if_needed(seat, now)
 
         if seat.state is not SeatState.HELD:
+            if was_held_by_this_passenger:
+                raise HoldExpiredException("Seat hold window has expired.")
             raise InvalidSeatTransition("Seat must be HELD to be confirmed.")
 
         if seat.held_by_passenger_id != passenger_id:
@@ -113,13 +127,9 @@ class SeatAlreadyAssigned(Exception):
     """
 
 
-class SeatAssignmentRepository:
+class SeatAssignmentRepository(Protocol):
     """
     Abstraction for persisting seat assignments with conflict-free semantics.
-
-    A real implementation should use a database with a UNIQUE constraint on
-    (flight_id, seat_id) and rely on an atomic INSERT/UPSERT to guarantee that
-    only one assignment can succeed even under concurrency.
     """
 
     def assign_seat_if_available(
@@ -129,11 +139,6 @@ class SeatAssignmentRepository:
         passenger_id: str,
         now: datetime,
     ) -> SeatAssignment:
-        """
-        Atomically assign the seat to the passenger if and only if it is not
-        already assigned. Returns the created assignment, or raises
-        SeatAlreadyAssigned on conflict.
-        """
         raise NotImplementedError
 
     def cancel_assignment(
@@ -143,15 +148,6 @@ class SeatAssignmentRepository:
         passenger_id: str,
         now: datetime,
     ) -> None:
-        """
-        Cancel an existing seat assignment, freeing the seat so that it can be
-        assigned again or offered to a waitlisted passenger.
-
-        A real implementation would typically:
-        - validate that the assignment exists for this passenger
-        - delete or mark the assignment as cancelled
-        - emit a domain event such as SeatCancelled
-        """
         raise NotImplementedError
 
 
@@ -167,7 +163,7 @@ class WaitlistEntry:
     joined_at: datetime
 
 
-class WaitlistRepository:
+class WaitlistRepository(Protocol):
     """
     Abstraction for managing waitlists for seats.
     """
@@ -182,20 +178,12 @@ class WaitlistRepository:
         raise NotImplementedError
 
     def dequeue_next(self, flight_id: str, seat_id: str) -> Optional[WaitlistEntry]:
-        """
-        Returns and removes the next eligible waitlisted passenger for the given
-        seat, or None if the waitlist is empty.
-        """
         raise NotImplementedError
 
 
 class WaitlistAssignmentService:
     """
     Coordinates waitlist enrollment and automatic assignment when seats free up.
-
-    In a real deployment, this would typically be triggered by events such as
-    SeatCancelled or SeatHoldExpired and would also publish notifications when
-    a waitlisted seat is assigned.
     """
 
     def __init__(
@@ -213,9 +201,6 @@ class WaitlistAssignmentService:
         passenger_id: str,
         now: datetime,
     ) -> WaitlistEntry:
-        """
-        Add a passenger to the waitlist for a particular seat.
-        """
         return self._waitlist_repo.enqueue(
             flight_id=flight_id,
             seat_id=seat_id,
@@ -229,11 +214,6 @@ class WaitlistAssignmentService:
         seat_id: str,
         now: datetime,
     ) -> Optional[SeatAssignment]:
-        """
-        When a seat becomes available, assign it to the next eligible waitlisted
-        passenger, if any. Returns the created assignment or None if there is no
-        one to assign or if the seat is already taken.
-        """
         while True:
             entry = self._waitlist_repo.dequeue_next(flight_id, seat_id)
             if entry is None:
@@ -246,78 +226,6 @@ class WaitlistAssignmentService:
                     passenger_id=entry.passenger_id,
                     now=now,
                 )
-                # In a real system, we would also trigger a notification here.
                 return assignment
             except SeatAlreadyAssigned:
-                # Seat was taken (e.g., directly selected by someone else)
-                # before we could assign it to this waitlisted passenger.
-                # Continue to the next entry, if any.
                 continue
-
-
-class CheckInStatus(Enum):
-    IN_PROGRESS = auto()
-    WAITING_FOR_PAYMENT = auto()
-    COMPLETED = auto()
-
-
-@dataclass
-class BaggageInfo:
-    total_weight_kg: float = 0.0
-    overweight_fee_due: float = 0.0
-
-
-@dataclass
-class CheckInSession:
-    """
-    Represents a passenger's check-in session, including baggage and payment status.
-    """
-
-    session_id: str
-    passenger_id: str
-    flight_id: str
-    created_at: datetime
-    status: CheckInStatus = CheckInStatus.IN_PROGRESS
-    baggage: BaggageInfo = BaggageInfo()
-    payment_reference: Optional[str] = None
-
-
-class CheckInSessionRepository:
-    """
-    Persistence abstraction for check-in sessions.
-    """
-
-    def get(self, session_id: str) -> Optional[CheckInSession]:
-        raise NotImplementedError
-
-    def save(self, session: CheckInSession) -> None:
-        raise NotImplementedError
-
-
-class WeightService(Protocol):
-    """
-    External service responsible for baggage weight validation and fee calculation.
-    """
-
-    MAX_WEIGHT_KG: float
-
-    def calculate_overweight_fee(self, total_weight_kg: float) -> float:
-        ...
-
-
-class PaymentService(Protocol):
-    """
-    Abstraction for payment processing related to baggage and check-in.
-    """
-
-    def charge_overweight_fee(
-        self,
-        session: CheckInSession,
-        amount: float,
-    ) -> str:
-        """
-        Charge the given amount and return a payment reference.
-        """
-        ...
-
-

@@ -44,6 +44,14 @@ services:
       context: .
       dockerfile: Dockerfile.reservation
     container_name: reservation-service
+    depends_on:
+      - seat-service
+      - baggage-service
+      - redis
+    environment:
+      SEAT_SERVICE_URL: http://seat-service:8000
+      BAGGAGE_SERVICE_URL: http://baggage-service:8001
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8002:8002"
 

@@ -1,20 +1,11 @@
 from datetime import datetime, timezone
 
-from skyhigh_core.application import CheckInStatusChangedEvent, SkyHighCoreService
-from skyhigh_core.domain import (
+from services.baggage_service.application import BaggageOrchestrationService, CheckInStatusChangedEvent
+from services.baggage_service.domain import (
     BaggageInfo,
     CheckInSession,
     CheckInSessionRepository,
     CheckInStatus,
-    SeatLifecycleService,
-    WaitlistAssignmentService,
-)
-from .inmemory_impl import (
-    InMemoryEventPublisher,
-    InMemoryKeyValueCache,
-    InMemorySeatAssignmentRepository,
-    InMemorySeatRepository,
-    InMemoryWaitlistRepository,
 )
 
 
@@ -59,36 +50,31 @@ class DummyPaymentService:
         return f"PAY-{session.session_id}"
 
 
-def _make_core_with_baggage() -> tuple[SkyHighCoreService, InMemoryCheckInSessionRepository, InMemoryEventPublisher]:
-    seat_repo = InMemorySeatRepository()
-    assignment_repo = InMemorySeatAssignmentRepository()
-    waitlist_repo = InMemoryWaitlistRepository()
-    waitlist_service = WaitlistAssignmentService(
-        waitlist_repo=waitlist_repo,
-        assignment_repo=assignment_repo,
-    )
-    cache = InMemoryKeyValueCache()
-    events = InMemoryEventPublisher()
+class CollectingEventPublisher:
+    def __init__(self) -> None:
+        self.events: list[CheckInStatusChangedEvent] = []
+
+    def publish(self, event: CheckInStatusChangedEvent) -> None:
+        self.events.append(event)
+
+
+def _make_baggage_service() -> tuple[BaggageOrchestrationService, InMemoryCheckInSessionRepository, CollectingEventPublisher]:
     checkin_repo = InMemoryCheckInSessionRepository()
     weight_service = SimpleWeightService(per_kg_fee=10.0)
     payment_service = DummyPaymentService()
+    events = CollectingEventPublisher()
 
-    core = SkyHighCoreService(
-        seat_repo=seat_repo,
-        assignment_repo=assignment_repo,
-        waitlist_service=waitlist_service,
-        cache=cache,
-        events=events,
-        seat_lifecycle=SeatLifecycleService(),
+    service = BaggageOrchestrationService(
         checkin_repo=checkin_repo,
         weight_service=weight_service,
         payment_service=payment_service,
+        events=events,
     )
-    return core, checkin_repo, events
+    return service, checkin_repo, events
 
 
 def test_baggage_within_limit_keeps_checkin_in_progress():
-    core, checkin_repo, events = _make_core_with_baggage()
+    service, checkin_repo, events = _make_baggage_service()
     session = CheckInSession(
         session_id="S1",
         passenger_id="P1",
@@ -99,7 +85,7 @@ def test_baggage_within_limit_keeps_checkin_in_progress():
     )
     checkin_repo.save(session)
 
-    updated = core.add_baggage_and_validate("S1", additional_weight_kg=10.0, now=_now())
+    updated = service.add_baggage_and_validate("S1", additional_weight_kg=10.0, now=_now())
 
     assert updated.baggage.total_weight_kg == 20.0
     assert updated.status is CheckInStatus.IN_PROGRESS
@@ -107,7 +93,7 @@ def test_baggage_within_limit_keeps_checkin_in_progress():
 
 
 def test_overweight_baggage_triggers_waiting_for_payment():
-    core, checkin_repo, events = _make_core_with_baggage()
+    service, checkin_repo, events = _make_baggage_service()
     session = CheckInSession(
         session_id="S2",
         passenger_id="P2",
@@ -118,7 +104,7 @@ def test_overweight_baggage_triggers_waiting_for_payment():
     )
     checkin_repo.save(session)
 
-    updated = core.add_baggage_and_validate("S2", additional_weight_kg=10.0, now=_now())
+    updated = service.add_baggage_and_validate("S2", additional_weight_kg=10.0, now=_now())
 
     assert updated.baggage.total_weight_kg == 30.0
     assert updated.baggage.overweight_fee_due > 0
@@ -127,7 +113,7 @@ def test_overweight_baggage_triggers_waiting_for_payment():
 
 
 def test_successful_payment_resets_status_to_in_progress():
-    core, checkin_repo, events = _make_core_with_baggage()
+    service, checkin_repo, events = _make_baggage_service()
     session = CheckInSession(
         session_id="S3",
         passenger_id="P3",
@@ -138,10 +124,9 @@ def test_successful_payment_resets_status_to_in_progress():
     )
     checkin_repo.save(session)
 
-    updated = core.process_baggage_payment("S3", now=_now())
+    updated = service.process_baggage_payment("S3", now=_now())
 
     assert updated.status is CheckInStatus.IN_PROGRESS
     assert updated.baggage.overweight_fee_due == 0.0
     assert updated.payment_reference is not None
     assert any(isinstance(e, CheckInStatusChangedEvent) for e in events.events)
-

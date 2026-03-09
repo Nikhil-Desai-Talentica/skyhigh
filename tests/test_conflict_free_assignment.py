@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import List
 
-from skyhigh_core.domain import SeatAlreadyAssigned, SeatAssignment
+from services.seat_service.domain import SeatAlreadyAssigned, SeatAssignment
 from .inmemory_impl import InMemorySeatAssignmentRepository
 
 

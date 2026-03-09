@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fastapi import FastAPI
 
-from skyhigh_core.domain import WeightService
+from .domain import WeightService
 
 
 class SimpleWeightService(WeightService):
