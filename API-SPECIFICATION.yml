@@ -1,0 +1,459 @@
+openapi: 3.0.3
+info:
+  title: SkyHigh Reservation System API
+  description: |
+    Client-facing API is the **Reservation Service** (port 8002). Seat and Baggage services
+    are internal; they are documented here for reference and for use by the reservation orchestrator.
+  version: 0.1.0
+
+servers:
+  - url: http://localhost:8002
+    description: Reservation Service (client-facing)
+  - url: http://localhost:8000
+    description: Seat Service (internal)
+  - url: http://localhost:8001
+    description: Baggage Service (internal)
+
+tags:
+  - name: Reservation
+    description: Client-facing reservation and waitlist API
+  - name: Seat
+    description: Internal seat lifecycle and waitlist (called by Reservation Service)
+  - name: Baggage
+    description: Internal baggage quote (called by Reservation Service)
+
+paths:
+  # ========== Reservation Service (client-facing) ==========
+
+  /reservations:
+    post:
+      tags: [Reservation]
+      summary: Create a new reservation (hold seat)
+      description: |
+        Creates a reservation and holds the seat for a limited time (e.g. 120 seconds).
+        Subject to abuse rate limiting; excessive requests may return 429.
+      operationId: createReservation
+      parameters:
+        - name: flightId
+          in: query
+          required: true
+          schema: { type: string }
+        - name: passengerId
+          in: query
+          required: true
+          schema: { type: string }
+        - name: seatId
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Reservation created; seat is held
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservationId: { type: string }
+                  status: { type: string, example: IN_PROGRESS }
+                  holdExpiresAt: { type: string, format: date-time }
+        "400":
+          description: Seat hold failed (e.g. seat not available)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+        "429":
+          description: Too many requests; client temporarily blocked
+          headers:
+            Retry-After: { schema: { type: integer }, description: Seconds until block ends }
+
+  /reservations/{reservation_id}:
+    get:
+      tags: [Reservation]
+      summary: Get reservation details
+      operationId: getReservation
+      parameters:
+        - $ref: "#/components/parameters/ReservationId"
+      responses:
+        "200":
+          description: Reservation details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservationId: { type: string }
+                  passengerId: { type: string }
+                  flightId: { type: string }
+                  seatId: { type: string }
+                  status: { type: string }
+                  baggageTotalKg: { type: number }
+                  overweightFee: { type: number }
+                  holdExpiresAt: { type: string, format: date-time, nullable: true }
+        "404":
+          description: Reservation not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+
+  /reservations/{reservation_id}/baggage:
+    post:
+      tags: [Reservation]
+      summary: Add baggage to reservation
+      description: |
+        Adds weight to the reservation; computes overweight fee via Baggage Service.
+        If fee > 0, reservation status becomes AWAITING_PAYMENT.
+      operationId: addBaggage
+      parameters:
+        - $ref: "#/components/parameters/ReservationId"
+        - name: additionalWeightKg
+          in: query
+          required: true
+          schema: { type: number, minimum: 0.001 }
+      responses:
+        "200":
+          description: Baggage added; fee and status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservationId: { type: string }
+                  baggageTotalKg: { type: number }
+                  overweightFee: { type: number }
+                  status: { type: string }
+        "400":
+          description: Invalid weight or reservation not in a valid status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+        "404":
+          description: Reservation not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+        "502":
+          description: Baggage service unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+
+  /reservations/{reservation_id}/complete:
+    post:
+      tags: [Reservation]
+      summary: Complete reservation (pay or abandon)
+      description: |
+        - pay=true: Confirms the seat with Seat Service and marks reservation COMPLETED.
+          If the hold has expired, reservation is marked FAILED and 400 is returned.
+        - pay=false: Marks reservation FAILED (abandoned); seat hold will expire.
+      operationId: completeReservation
+      parameters:
+        - $ref: "#/components/parameters/ReservationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pay]
+              properties:
+                pay: { type: boolean }
+      responses:
+        "200":
+          description: Reservation completed or failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservationId: { type: string }
+                  status: { type: string, enum: [COMPLETED, FAILED] }
+        "400":
+          description: |
+            Reservation already FAILED, wrong status, hold expired, or seat confirm failed.
+            Detail message describes the reason.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+        "404":
+          description: Reservation not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+        "502":
+          description: Seat service unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+
+  /reservations/{reservation_id}/cancel:
+    post:
+      tags: [Reservation]
+      summary: Cancel a completed reservation
+      description: |
+        Only COMPLETED reservations can be cancelled. Releases the seat in Seat Service
+        (seat may be assigned to the next waitlisted passenger).
+      operationId: cancelReservation
+      parameters:
+        - $ref: "#/components/parameters/ReservationId"
+      responses:
+        "200":
+          description: Reservation cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservationId: { type: string }
+                  status: { type: string, example: CANCELLED }
+        "400":
+          description: Reservation is not COMPLETED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+        "404":
+          description: Reservation not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+        "502":
+          description: Seat service unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+
+  /waitlist:
+    post:
+      tags: [Reservation]
+      summary: Join waitlist for a seat
+      description: |
+        Adds the passenger to the waitlist for the given seat. Subject to abuse rate limiting.
+      operationId: joinWaitlist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [flightId, passengerId, seatId]
+              properties:
+                flightId: { type: string }
+                passengerId: { type: string }
+                seatId: { type: string }
+      responses:
+        "200":
+          description: Added to waitlist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flightId: { type: string }
+                  seatId: { type: string }
+                  passengerId: { type: string }
+                  joinedAt: { type: string, format: date-time }
+                  message: { type: string }
+        "429":
+          description: Too many requests; client temporarily blocked
+          headers:
+            Retry-After: { schema: { type: integer } }
+        "502":
+          description: Seat service unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+
+  # ========== Seat Service (internal) ==========
+
+  /seats/{flight_id}/{seat_id}/hold-status:
+    get:
+      tags: [Seat]
+      summary: Get hold status for a seat
+      description: Returns whether the seat is still held for the given passenger (applies expiry).
+      operationId: getHoldStatus
+      parameters:
+        - name: flight_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: seat_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: passenger_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Hold status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  held: { type: boolean }
+                  reason: { type: string, enum: [held, expired, released, held_by_other, not_held] }
+
+  /seats/{flight_id}/{seat_id}/hold:
+    post:
+      tags: [Seat]
+      summary: Hold a seat
+      parameters:
+        - name: flight_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: seat_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: passenger_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flightId: { type: string }
+                  seatId: { type: string }
+                  state: { type: string, example: HELD }
+        "400":
+          description: Seat not available or invalid transition
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+
+  /seats/{flight_id}/{seat_id}/confirm:
+    post:
+      tags: [Seat]
+      summary: Confirm a held seat
+      parameters:
+        - name: flight_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: seat_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: passenger_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flightId: { type: string }
+                  seatId: { type: string }
+                  passengerId: { type: string }
+        "400":
+          description: Hold expired or invalid transition
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+
+  /seats/{flight_id}/{seat_id}/cancel:
+    post:
+      tags: [Seat]
+      summary: Cancel a confirmed seat
+      parameters:
+        - name: flight_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: seat_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: passenger_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /seats/{flight_id}/{seat_id}/waitlist:
+    post:
+      tags: [Seat]
+      summary: Add passenger to waitlist for seat
+      parameters:
+        - name: flight_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: seat_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: passenger_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flight_id: { type: string }
+                  seat_id: { type: string }
+                  passenger_id: { type: string }
+                  joined_at: { type: string, format: date-time }
+
+  # ========== Baggage Service (internal) ==========
+
+  /baggage/quote:
+    post:
+      tags: [Baggage]
+      summary: Get baggage quote (overweight fee)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [flightId, passengerId, totalWeightKg]
+              properties:
+                flightId: { type: string }
+                passengerId: { type: string }
+                totalWeightKg: { type: number }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flightId: { type: string }
+                  passengerId: { type: string }
+                  totalWeightKg: { type: number }
+                  overweightFee: { type: number }
+
+components:
+  parameters:
+    ReservationId:
+      name: reservation_id
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    ErrorDetail:
+      type: object
+      properties:
+        detail: { type: string }
