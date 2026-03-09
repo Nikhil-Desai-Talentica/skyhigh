@@ -1715,3 +1715,767 @@ Next steps (when you’re ready) are to flesh out the Reservation Service endpoi
 
 perhaps it would be better to move the domain models and other related knowledge under the appropriate services; increases cohesion
 
+# Airline reservation system microservices architecture
+_Exported on 3/9/2026 at 23:21:50 GMT+5:30 from Cursor (2.4.31)_
+
+---
+
+**User**
+
+let's refactor this airline reservation system to use microservices architecture;
+perhaps it would be better to move the domain models and other knowledge under the appropriate services to increse cohesion;
+
+---
+
+**Cursor**
+
+
+Exploring the codebase to map the airline reservation system's structure before we refactor it into a microservices architecture.
+
+
+
+Reading key source files to map dependencies and design the microservices split.
+
+
+
+Reading the three service entry points and test infrastructure:
+
+
+
+Checking test files and Dockerfiles to understand the full setup:
+
+
+
+Creating a refactoring plan and implementing it: we'll move domain logic into each service and have the reservation service call the seat and baggage services over HTTP.
+
+
+
+Adding seat-service infrastructure. Using JSON for the cache instead of pickle for security.
+
+
+
+Creating the baggage service with its own domain and application.
+
+
+
+Using an Enum for CheckInStatus to match the original and improve type safety.
+
+
+
+Creating the reservation service domain and HTTP clients for seat and baggage.
+
+
+
+Adding `services/__init__.py`, adding `httpx` to dependencies, and updating tests to use the new service modules.
+
+
+
+Updating test infrastructure and tests to use the new service modules.
+
+
+
+Updating docker-compose so the reservation service can reach seat and baggage, and updating Dockerfiles to stop copying `skyhigh_core`. Checking whether any code still references `skyhigh_core`:
+
+
+
+Removing `skyhigh_core` from Dockerfiles and making the reservation service depend on the seat service. Adding a deprecation note to `skyhigh_core` and updating `pyproject.toml`.
+
+
+
+Running tests to verify everything works:
+
+
+
+Checking for linter errors in the new files:
+
+
+
+Checking for a conftest and adding a brief README note on running tests:
+
+
+
+Summary of the microservices refactor:
+
+## 1. **Seat service** (`services/seat_service/`)
+
+- **domain.py**: `Seat`, `SeatState`, `SeatLifecycleService`, `SeatAssignment`, `WaitlistEntry`, `WaitlistRepository`, `SeatAssignmentRepository`, `WaitlistAssignmentService`, and related exceptions.
+- **application.py**: `SeatRepository`, `KeyValueCache`, `EventPublisher`, seat events, and `SeatOrchestrationService` (hold/confirm/cancel and waitlist; no baggage/check-in).
+- **infrastructure.py**: Postgres seat and assignment repos, Redis cache (JSON for seats, no pickle), Redis waitlist, Redis event publisher.
+- **main.py**: Uses only local modules and env for `DATABASE_URL` / `REDIS_URL`.
+
+## 2. **Baggage service** (`services/baggage_service/`)
+
+- **domain.py**: `BaggageInfo`, `CheckInStatus`, `CheckInSession`, `CheckInSessionRepository`, `WeightService`, `PaymentService`.
+- **application.py**: `CheckInStatusChangedEvent`, `BaggageOrchestrationService` (`add_baggage_and_validate`, `process_baggage_payment`).
+- **main.py**: Uses local `WeightService` and `BaggageQuoteRequest`; quote endpoint unchanged.
+
+## 3. **Reservation service** (`services/reservation_service/`)
+
+- **domain.py**: `Reservation`, `ReservationStatus`, `ReservationRepository` (no `BaggageInfo`; only `overweight_fee` and IDs).
+- **clients.py**: `SeatServiceClient` and `BaggageServiceClient` (HTTP calls to the other two services).
+- **main.py**:  
+  - `POST /reservations`: calls seat client to hold the seat, then saves the reservation (with optional `hold_expires_at`).  
+  - `GET /reservations/{id}`: unchanged.  
+  - `POST /reservations/{id}/quote-baggage`: calls baggage service for a quote and stores `overweight_fee` on the reservation.
+
+## 4. **Cross-service wiring**
+
+- **docker-compose.yml**: Reservation service has `depends_on: seat-service, baggage-service` and env `SEAT_SERVICE_URL`, `BAGGAGE_SERVICE_URL`.
+- **Dockerfiles**: No longer copy `skyhigh_core`; only `services/` and project files.
+
+## 5. **Tests**
+
+- **tests/inmemory_impl.py**: Implements seat-service protocols only; imports from `services.seat_service`.
+- **tests/test_*.py**: Use `services.seat_service` and `services.baggage_service` instead of `skyhigh_core`.
+- **tests/test_baggage_and_payment.py**: Uses `BaggageOrchestrationService` and baggage domain types; in-memory check-in repo and event collector live in the test file.
+
+## 6. **Deprecated shared core**
+
+- **skyhigh_core/**: Left in the repo with `skyhigh_core/DEPRECATED.md`; not copied into Docker images and not in `pyproject.toml` package list.
+- **pyproject.toml**: `httpx` added for reservation HTTP clients; package list is `services*` only.
+
+Run tests from the repo root with:
+
+```bash
+PYTHONPATH=. pytest tests/
+```
+
+Run the system with:
+
+```bash
+docker compose up
+```
+
+Reservation creation now goes through the seat service for the hold; baggage quotes go through the baggage service. Each service owns its own domain and persistence for better cohesion.
+
+---
+
+**User**
+
+can I delete skyhigh_core?
+
+---
+
+**Cursor**
+
+
+Checking for remaining references to `skyhigh_core`:
+
+
+
+Deleting `skyhigh_core`. The only remaining references are in the generated `.egg-info` (from an old install); no source or config references it.
+
+
+
+Removing the stale `.egg-info` so the next install doesn't reference the deleted package:
+
+
+
+Yes. **`skyhigh_core` has been removed.**
+
+- All 6 files in `skyhigh_core/` were deleted and the directory was removed.
+- The generated `skyhigh.egg-info` directory was also deleted so future installs don’t reference the old package.
+
+Everything now uses the service packages under `services/` (seat, baggage, reservation). You can reinstall with `pip install -e .` or `uv sync` when you’re ready.
+
+---
+
+**User**
+
+reservations service is what the users/clients use;
+it must expose the following functionalities
+make a new reseravtion, resulting in holding a seat
+add baggage towards a reservation, if any, resulting in baggage charges calculation and marking it as awaiting payment
+pay for a reservation or not, marking it as completed or failed respectively
+cancel a completed reservation thereby releasing the seat back, rendering it available for further assignment, either to users in the waitlist if any
+
+---
+
+**Cursor**
+
+
+Implementing the reservation service as the main client-facing API with the requested flows. Checking the current reservation, seat, and baggage code:
+
+
+
+Implementing the full client-facing flow: updating the domain and API.
+
+
+
+Using a request body for the complete endpoint so the API is explicit:
+
+
+
+Adding a request body model for the complete endpoint so clients can send JSON.
+
+
+
+Using a Pydantic model for the request body so FastAPI can parse it.
+
+
+
+Summary of what’s in place:
+
+## Reservation service (client-facing API)
+
+### 1. **Make a new reservation (holds a seat)**
+- **`POST /reservations?flightId=...&passengerId=...&seatId=...`**  
+  Creates a reservation and holds the seat via the seat service. Returns `reservationId`, `status`, `holdExpiresAt`.
+
+### 2. **Add baggage (charges + awaiting payment)**
+- **`POST /reservations/{reservation_id}/baggage?additionalWeightKg=...`**  
+  Adds weight to the reservation, calls the baggage service for a quote, updates `baggageTotalKg` and `overweightFee`. If `overweightFee > 0`, sets status to **AWAITING_PAYMENT**.
+
+### 3. **Pay or not (complete or fail)**
+- **`POST /reservations/{reservation_id}/complete`**  
+  Body: `{"pay": true}` or `{"pay": false}`.  
+  - **pay: true** → seat service confirms the seat, reservation status → **COMPLETED**.  
+  - **pay: false** → reservation status → **FAILED** (seat hold expires after 120s).
+
+### 4. **Cancel a completed reservation (release seat)**
+- **`POST /reservations/{reservation_id}/cancel`**  
+  Allowed only when status is **COMPLETED**. Calls the seat service to cancel the seat (releasing it for waitlist or others), then sets reservation status to **CANCELLED**.
+
+### Other
+- **`GET /reservations/{reservation_id}`**  
+  Returns full reservation details, including `baggageTotalKg`, `overweightFee`, `holdExpiresAt`.
+
+### Domain change
+- **Reservation** now has **`baggage_total_kg`** so baggage is accumulated per reservation and add-baggage uses the baggage service to compute the fee and set **AWAITING_PAYMENT** when there is an overweight charge.
+
+---
+
+**User**
+
+when attempting to pay for a reservation, explicitly handle the case where the seat hold window expires and mark the reservation as failed, stating the window expiry
+
+---
+
+**Cursor**
+
+
+Adding an explicit check for an expired seat hold before attempting payment, marking the reservation as FAILED and returning a clear error.
+
+
+
+Summary of changes:
+
+**When completing with `pay: true`:**
+1. **Before** calling the seat service to confirm, we check whether the hold has expired: `hold_expires_at` is set and `now > hold_expires_at`.
+2. **If expired:** the reservation is set to **FAILED**, saved, and we respond with **400** and a body like:
+   - `"Seat hold window expired. The reservation could not be completed. Hold expired at <hold_expires_at in ISO format>."`
+3. **If not expired:** we call the seat service to confirm and set the reservation to **COMPLETED** as before.
+
+So a late payment attempt is explicitly treated as hold expiry: the reservation is marked FAILED and the client gets a clear message that the hold window expired and when it expired.
+
+---
+
+**User**
+
+a better way is to ask the seat service if the seat associated with a reservation is still being held or has been released; one other way is to use events, the seat service emits it and the reservation service listens and updates the status of the reservation to failed in case of a late payment and any attempt thereafter will be met with a helpful error message showing that the seat has been released
+
+---
+
+**Cursor**
+
+
+Implementing both approaches: adding a seat-service endpoint to report hold status (used before payment), and having the seat service emit hold-expired events so the reservation service can listen and mark reservations failed.
+
+
+
+Implementing both: adding a hold-status endpoint on the seat service and hold-expired events plus a reservation listener.
+
+
+
+Implementing step by step: adding HoldExpiredException and get_hold_status in the seat service:
+
+
+
+Catching HoldExpiredException in the orchestration, publishing HoldExpiredEvent, and re-raising.
+
+
+
+Adding the GET hold-status endpoint and wiring the Redis event publisher in the seat service.
+
+
+
+Adding the reservation service client method and completion flow.
+
+
+
+Adding the event listener: checking whether the reservation service has Redis available and adding a listener module.
+
+
+
+Adding the hold-expired event listener and starting it at app startup:
+
+
+
+Starting the listener on app startup:
+
+
+
+Setting repo in lifespan and removing the redundant startup event.
+
+
+
+Emitting HoldExpiredEvent when another passenger's hold replaces an expired one:
+
+
+
+Summary of what was implemented:
+
+## 1. **Ask the seat service (hold-status)**
+
+**Seat service**
+- **`GET /seats/{flight_id}/{seat_id}/hold-status?passenger_id=...`**  
+  Returns `{ "held": true|false, "reason": "held"|"expired"|"released"|"held_by_other"|"not_held" }`.  
+  Applies expiry (and persists it if the hold was expired) so the result matches current seat state.
+
+**Reservation service (before payment)**
+- On **pay**, calls **`get_hold_status`** first.
+- If **`held === false`**: sets reservation to **FAILED**, saves, and returns **400** with:
+  - `"The seat hold window has expired; the seat has been released. The reservation could not be completed."` when `reason === "expired"`, or
+  - `"The seat has been released and is no longer held for this reservation. The reservation could not be completed."` otherwise.
+- If **reservation is already FAILED** (e.g. updated by event): returns **400**  
+  `"Reservation has failed; the seat has been released (hold expired or no longer held)."`
+- If **confirm_seat** returns 400 (e.g. expiry race): reservation is set to **FAILED** and the response explains that the hold had expired.
+
+## 2. **Events: seat service emits, reservation service listens**
+
+**Seat service**
+- **`HoldExpiredException`** in domain when confirm is called for an expired hold.
+- **`HoldExpiredEvent`** (flight_id, seat_id, passenger_id, occurred_at) emitted:
+  - when **confirm_seat** raises **HoldExpiredException** (after persisting the expiry), and
+  - when **hold_seat** expires a previous holder (another passenger takes the seat).
+- Events are published to Redis list **`events:seat`** (same as other seat events).
+
+**Reservation service**
+- **Event listener** (in `events.py`): background thread **BLPOP** on **`events:seat`**.
+  - On **HoldExpiredEvent**, finds reservation by **(flight_id, seat_id, passenger_id)** via **`get_by_seat`**, sets status to **FAILED**, and saves.
+- Listener is started at app startup (lifespan); **REDIS_URL** must be set (e.g. in docker-compose).
+- **ReservationRepository** (and in-memory impl) now support **`get_by_seat(flight_id, seat_id, passenger_id)`** for this lookup.
+
+**Docker**
+- **reservation-service** now **depends_on: redis** and has **REDIS_URL: redis://redis:6379/0**.
+
+Resulting behaviour:
+- **Before payment**: reservation service asks the seat service if the seat is still held; if not, it marks the reservation FAILED and returns a clear message.
+- **Proactively**: when a hold expires (confirm failed or another passenger took the seat), the seat service emits **HoldExpiredEvent** and the reservation service marks the matching reservation FAILED.
+- **Later payment attempts** on that reservation get the same clear “seat has been released” style error.
+
+---
+
+**User**
+
+one more functionality we need to surface to the users in the reservation service is to let the users express their desire to be added to waitlist for a particular seat
+
+---
+
+**Cursor**
+
+
+Checking how the seat service exposes the waitlist and adding a reservation-service endpoint so users can join the waitlist for a seat.
+
+
+
+Adding waitlist support: exposing join_waitlist on the seat service and a client-facing endpoint on the reservation service.
+
+
+
+Adding the waitlist flow: seat service orchestration and endpoint, then reservation client and endpoint.
+
+
+
+Adding the reservation service endpoint and request model:
+
+
+
+Summary of what was added:
+
+## 1. **Seat service**
+
+- **`SeatOrchestrationService.join_waitlist(flight_id, seat_id, passenger_id, now)`**  
+  Delegates to `WaitlistAssignmentService.join_waitlist` and returns a dict with `flight_id`, `seat_id`, `passenger_id`, `joined_at`.
+
+- **`POST /seats/{flight_id}/{seat_id}/waitlist?passenger_id=...`**  
+  Adds the passenger to the waitlist for that seat and returns the waitlist entry.
+
+## 2. **Reservation service (client-facing)**
+
+- **`SeatServiceClient.join_waitlist(flight_id, seat_id, passenger_id)`**  
+  Calls the seat service waitlist endpoint.
+
+- **`POST /waitlist`**  
+  Request body:
+  ```json
+  { "flightId": "...", "passengerId": "...", "seatId": "..." }
+  ```
+  Response:
+  - `flightId`, `seatId`, `passengerId`, `joinedAt` (ISO timestamp)
+  - `message`: `"You have been added to the waitlist for this seat."`
+
+  On seat service errors, returns **502** with a clear error message.
+
+Users can join the waitlist for a specific seat by calling **`POST /waitlist`** with `flightId`, `passengerId`, and `seatId`. When that seat is freed (e.g. by a cancellation), the seat service’s existing `auto_assign_next` logic can assign it to the next waitlisted passenger.
+
+---
+
+**User**
+
+one final requirement to fulfill is to prevent abuse and detect bots
+detect cases where a single source rapidly acesses multiple seat maps, and when happens, the system must block further access to that client temporarily
+
+---
+
+**Cursor**
+
+
+Adding abuse/bot detection: rate-limiting rapid seat-related requests and temporarily blocking abusive clients. Checking the reservation service structure and Redis usage:
+
+
+
+Implementing abuse detection: adding an abuse-detection module and applying it to seat-related endpoints.
+
+
+
+Wiring the abuse detector into the reservation service and protecting seat-related endpoints.
+
+
+
+Fixing Redis key formatting: the key template must be formatted with `client_id` when used.
+
+
+
+Summary of what was implemented:
+
+## Abuse / bot handling
+
+### 1. **`services/reservation_service/abuse.py`**
+
+- **Client ID**  
+  From `X-Forwarded-For` (first IP), then `X-Real-IP`, then `request.client.host`. Sanitized for use in Redis keys (allowed: `a–f`, `0–9`, `.`, `:`, `-`).
+
+- **Rate limit**  
+  Counts “seat access” requests per client in a sliding window (default **60 seconds**).  
+  Config via env (defaults in parentheses):
+  - `ABUSE_WINDOW_SECONDS` (60)
+  - `ABUSE_MAX_REQUESTS` (15)
+  - `ABUSE_BLOCK_DURATION_SECONDS` (300)
+
+- **Blocking**  
+  If a client exceeds **15** requests in **60** seconds, they are **blocked for 5 minutes**.  
+  Storage: **Redis** (`abuse:count:{client_id}`, `abuse:blocked:{client_id}`) when `REDIS_URL` is set; otherwise an **in-memory**, thread-safe fallback.
+
+- **APIs**
+  - `is_blocked(client_id)` – whether the client is currently blocked
+  - `record_seat_access(client_id)` – record one request and possibly set block
+  - `block_remaining_seconds(client_id)` – seconds left in the block (for `Retry-After`)
+
+### 2. **Reservation service wiring**
+
+- **Dependency** `require_seat_access_not_abused(request)`  
+  Resolves client ID from the request, checks `is_blocked`, then calls `record_seat_access`.  
+  If blocked: **429** with body  
+  `"Too many requests. Access to seat availability has been temporarily blocked to prevent abuse. Please try again later."`  
+  and **`Retry-After`** header (seconds until block ends).
+
+- **Protected routes** (seat-map–style access):
+  - **`POST /reservations`** – create reservation (hold seat)
+  - **`POST /waitlist`** – join waitlist for a seat  
+
+  Both use the dependency so rapid create-reservation or join-waitlist traffic from one client is limited and then temporarily blocked.
+
+### 3. **Behavior**
+
+- Clients are identified by IP (or first proxy IP from headers).
+- Only these two seat-related operations are counted and can trigger a block.
+- Block is temporary; after the block duration they can call again (and are rate-limited again).
+- With **Redis**, limits and blocks are shared across reservation-service instances; without Redis, each instance has its own in-memory state.
+
+---
+
+**User**
+
+generate a PRD.md file that describes the problem being solved, the goals of the system, the key users who will interacts with it
+
+---
+
+**Cursor**
+
+
+Reviewing the system to draft an accurate PRD:
+
+
+
+Created **`PRD.md`** in the repo root. It includes:
+
+1. **Problem statement**  
+   Why the system exists: avoid double-booking and races, handle time-sensitive holds, support baggage and fees, waitlist and seat re-use, scale via separate services, and limit abuse/bots.
+
+2. **Goals**  
+   Seven product goals: safe bookings at scale, single client-facing API, clear hold/payment behavior, integrated baggage and fees, waitlist and re-use of released seats, abuse/bot mitigation, and event-driven consistency (e.g. hold expired → reservation failed).
+
+3. **Key users**  
+   Table of four user types and how they use the system:
+   - **Passenger** – create reservation, add baggage, pay or abandon, cancel, join waitlist.
+   - **Travel agent / front-end app** – same reservation APIs on behalf of passengers.
+   - **Operations / support** – query reservation/seat state for support.
+   - **System / automation** – seat service and event listeners that keep state in sync and enforce abuse controls.
+
+4. **Out of scope**  
+   Short list of what this PRD does not cover: flight search/schedules, auth, real payment processing, full check-in/boarding.
+
+You can extend `PRD.md` with sections such as success metrics, non-functional requirements, or release phases if you want.
+
+---
+
+**User**
+
+generate a PROJECT_STRUCTURE.md explaining the structure of the project and the purpose for each of the folder and key modules
+
+---
+
+**Cursor**
+
+
+Created **`PROJECT_STRUCTURE.md`** in the repo root. It includes:
+
+1. **Root** – README, PRD, pyproject.toml, requirements.txt, docker-compose, and the three Dockerfiles and what they’re for.
+
+2. **`services/`** – Package that contains the three microservices.
+
+3. **`services/seat_service/`** – Table for each module:
+   - **domain.py** – Seat states, lifecycle, assignments, waitlist, exceptions.
+   - **application.py** – Orchestration, protocols, events.
+   - **infrastructure.py** – Postgres and Redis implementations.
+   - **main.py** – FastAPI app and seat/waitlist endpoints.
+
+4. **`services/baggage_service/`** – Same style for domain, application, and main (baggage/check-in and quote API).
+
+5. **`services/reservation_service/`** – Same for domain, clients, events (hold-expired listener), abuse (rate limit/block), and main (all reservation and waitlist APIs).
+
+6. **`tests/`** – What `inmemory_impl.py` provides and what each test file covers (lifecycle, full flow, waitlist, conflict-free assignment, baggage/payment).
+
+7. **Data flow** – Short summary of how clients, reservation, seat, baggage, Postgres, and Redis interact, plus how to run and test.
+
+If you want, we can add a small diagram (e.g. Mermaid) or more detail for a specific folder or module.
+
+---
+
+**User**
+
+generate a WORKFLOW_DESIGN.md, a document explaining the implementation, flow diagrams, database schema
+
+---
+
+**Cursor**
+
+
+Reviewing implementation details and database schema to produce an accurate workflow design document:
+
+
+
+Writing the workflow design document.
+
+
+
+Created **`WORKFLOW_DESIGN.md`** in the repo root. It includes:
+
+1. **Implementation overview**
+   - Roles of reservation, seat, and baggage services and where they persist data.
+   - Design choices (seat consistency, hold expiry, events, abuse, reservation storage).
+   - **Seat state machine**: AVAILABLE → HELD → CONFIRMED → CANCELLED (with expire back to AVAILABLE).
+
+2. **Flow diagrams (Mermaid)**
+   - **Create reservation** – Abuse check → Seat hold (Postgres + Redis cache + event) → Save reservation.
+   - **Add baggage** – Get reservation → Baggage quote → Update reservation (and AWAITING_PAYMENT if fee &gt; 0).
+   - **Complete reservation** – Hold-status check → If paying and held: confirm seat (Postgres assignment); if not held or not paying: mark FAILED/COMPLETED as appropriate.
+   - **Cancel completed** – Seat cancel (Postgres + delete assignment) → Waitlist auto-assign (Redis waitlist → Postgres) → Reservation CANCELLED.
+   - **Hold-expired event** – Seat service publishes HoldExpiredEvent to Redis; reservation service consumes and sets reservation FAILED.
+   - **Join waitlist** – Abuse check → Seat service enqueues to Redis waitlist.
+   - **Abuse detection** – Block check → Record access → Optional block (429 + Retry-After).
+
+3. **Database schema**
+   - **Postgres (seat service):** `seats` (state, hold/confirm/cancel timestamps and passenger IDs) and `seat_assignments` (flight_id, seat_id, passenger_id, assigned_at) with CREATE TABLE and UNIQUE constraint.
+   - **Redis (seat):** `seat:{flight_id}:{seat_id}`, `waitlist:{flight_id}:{seat_id}`, `events:seat`.
+   - **Redis (reservation):** `abuse:count:{client_id}`, `abuse:blocked:{client_id}`.
+   - **Reservation aggregate:** In-memory only; listed logical fields.
+
+4. **Configuration summary**
+   - Env vars for DB, Redis, service URLs, and abuse/rate-limit parameters.
+
+Mermaid diagrams should render in GitHub, GitLab, and most Markdown viewers that support Mermaid.
+
+---
+
+**User**
+
+generate an ARCHITECTURE.md explaining the architecture with diagrams
+
+---
+
+**Cursor**
+
+
+Replacing the C4 context diagram with a standard Mermaid diagram for broader compatibility:
+
+
+
+Created **`ARCHITECTURE.md`** in the repo root. It includes:
+
+1. **System context** – Mermaid diagram: passengers/automation → Reservation API → Seat and Baggage services; Reservation and Seat use Redis; Seat uses Postgres. Short prose summary of the same.
+
+2. **Container / deployment view** – Flowchart of Docker Compose: Reservation (FastAPI + event listener + abuse), Seat, Baggage, Postgres, Redis; HTTP and Redis connections; table of service dependencies.
+
+3. **Service boundaries** – Diagram of the three services and their internal pieces (API, domain, clients, events, abuse, infra). Table of what each service owns and what it does not.
+
+4. **Communication patterns**
+   - **Synchronous:** HTTP from Reservation to Seat and Baggage (sequence diagram).
+   - **Asynchronous:** Redis list `events:seat`; Seat RPUSH, Reservation BLPOP and updates reservations (flowchart).
+
+5. **Data ownership** – Diagram of where data lives (in-memory reservations, Redis abuse keys, Postgres seats/assignments, Redis seat cache/waitlist/events). Table of data owner, storage, and who may access it.
+
+6. **Layered view**
+   - **Reservation service:** API → application (orchestration, clients, events, abuse) → domain.
+   - **Seat service:** API → application (orchestration, events) → domain → infrastructure (Postgres, Redis).
+
+7. **Design principles** – Single entry point, bounded contexts, sync for commands, async for reactions, no shared DB (only shared Redis with namespaced keys), abuse handled at the edge.
+
+8. **Diagram index** – Short table listing each diagram and what it shows.
+
+All diagrams use standard Mermaid (`flowchart`, `sequenceDiagram`) so they render in GitHub, GitLab, and most Markdown viewers. For step-by-step flows (create reservation, complete, cancel, etc.), the doc points to **WORKFLOW_DESIGN.md**.
+
+---
+
+**User**
+
+generate a API-SPECIFICATION.yml documenting the API
+
+---
+
+**Cursor**
+
+
+Gathering all API endpoints from the three services to produce an accurate OpenAPI spec:
+
+
+
+Created **`API-SPECIFICATION.yml`** as an OpenAPI 3.0.3 spec. It includes:
+
+**Reservation Service (client-facing, port 8002)**  
+- **POST /reservations** – Create reservation (hold seat); query params `flightId`, `passengerId`, `seatId`; 200/400/429.  
+- **GET /reservations/{reservation_id}** – Get reservation; 200/404.  
+- **POST /reservations/{reservation_id}/baggage** – Add baggage; query `additionalWeightKg`; 200/400/404/502.  
+- **POST /reservations/{reservation_id}/complete** – Complete (pay or abandon); body `{ "pay": true|false }`; 200/400/404/502.  
+- **POST /reservations/{reservation_id}/cancel** – Cancel completed reservation; 200/400/404/502.  
+- **POST /waitlist** – Join waitlist; body `{ flightId, passengerId, seatId }`; 200/429/502.
+
+**Seat Service (internal, port 8000)**  
+- **GET /seats/{flight_id}/{seat_id}/hold-status** – Query `passenger_id`; response `{ held, reason }`.  
+- **POST /seats/{flight_id}/{seat_id}/hold** – Query `passenger_id`.  
+- **POST /seats/{flight_id}/{seat_id}/confirm** – Query `passenger_id`.  
+- **POST /seats/{flight_id}/{seat_id}/cancel** – Query `passenger_id`.  
+- **POST /seats/{flight_id}/{seat_id}/waitlist** – Query `passenger_id`.
+
+**Baggage Service (internal, port 8001)**  
+- **POST /baggage/quote** – Body `{ flightId, passengerId, totalWeightKg }`; response includes `overweightFee`.
+
+**Other**  
+- **servers**: One entry per service (8002, 8000, 8001).  
+- **tags**: Reservation, Seat, Baggage.  
+- **components**: Shared `reservation_id` path parameter and `ErrorDetail` schema (`detail` string).  
+- **Error responses**: 400, 404, 429 (with `Retry-After` where relevant), 502, with `detail` where used.
+
+You can use this file with Swagger UI, Redoc, or other OpenAPI tools to view or generate clients.
+
+---
+
+**User**
+
+generate a TEST_REPORT.md discussing the test coverage
+
+---
+
+**Cursor**
+
+
+Exploring the test suite and checking for coverage configuration:
+
+
+
+Running the test suite to capture results:
+
+
+
+Checking whether the seat domain raises HoldExpiredException or InvalidSeatTransition after expiry:
+
+
+
+Adding a note about the HoldExpiredException vs InvalidSeatTransition mismatch:
+
+
+
+Summary of **TEST_REPORT.md**:
+
+1. **Executive summary** – 14 tests in 5 modules; focus on Seat and Baggage domain/application; no Reservation API or abuse/event-listener tests; how to run (PYTHONPATH, pytest).
+
+2. **Test suite overview** – Table of each test file, number of tests, and what it covers; role of `inmemory_impl.py` and that tests use no Postgres/Redis.
+
+3. **Coverage by area**
+   - **Seat domain:** What’s covered (hold/confirm/cancel/expiry/transitions) and what’s not (e.g. `HoldExpiredException` test expectation).
+   - **Seat application:** Orchestration and events covered; `get_hold_status`, `join_waitlist`, `HoldExpiredEvent` emission, cache behavior not covered.
+   - **Seat infrastructure:** In-memory used; Postgres/Redis not tested.
+   - **Baggage:** Orchestration and status changes covered; HTTP API and some edge cases not.
+   - **Reservation service:** No tests (API, orchestration, abuse, event listener).
+   - **Baggage HTTP:** No tests.
+
+4. **Test categories** – Domain unit, application integration, concurrency, event emission; no API/e2e/coverage tooling.
+
+5. **Gaps and recommendations**
+   - **High:** Reservation API tests (TestClient + mocked clients), abuse-detector tests, hold-expired listener test.
+   - **Medium:** `get_hold_status` and `join_waitlist` orchestration tests, pytest-cov.
+   - **Lower:** Infrastructure tests (testcontainers), Seat/Baggage HTTP tests.
+
+6. **How to run** – Commands for running tests and (optionally) coverage.
+
+Also noted: `test_cannot_confirm_after_hold_has_expired` should expect `HoldExpiredException` instead of `InvalidSeatTransition` to match the current domain.
+
+---
+
+**User**
+
+improve the README.md, making it a bit more detailed
+
+---
+
+**Cursor**
+
+
+Fixing the table cell so the pipe doesn't break the table:
+
+
+
+Summary of updates to **README.md**:
+
+1. **Title and intro** — Short description of the system and that it’s microservice-based with a single Reservation API.
+
+2. **Features** — Bullet list: reservations, seat lifecycle, waitlist, baggage, hold expiry handling, abuse protection.
+
+3. **Prerequisites** — Python 3.10+, Docker & Docker Compose, and optional uv/pip.
+
+4. **Quick start**
+   - `docker compose up --build` and what it runs (Postgres, Redis, three services, ports).
+   - Example `curl` to create a reservation.
+   - How to run tests (install dev deps, `PYTHONPATH=. pytest tests/ -v`).
+
+5. **Architecture** — Table of the three services (ports and roles) and note that only the Reservation service is client-facing.
+
+6. **Configuration** — Table of env vars: `DATABASE_URL`, `REDIS_URL`, service URLs, and abuse-related settings with defaults/purpose.
+
+7. **API overview** — Table of the main Reservation API methods and paths with short descriptions and a pointer to `API-SPECIFICATION.yml`.
+
+8. **Documentation** — Table linking to PRD, ARCHITECTURE, WORKFLOW_DESIGN, PROJECT_STRUCTURE, API-SPECIFICATION, and TEST_REPORT.
+
+9. **License** — Single line pointing to the repo for license details.
+
