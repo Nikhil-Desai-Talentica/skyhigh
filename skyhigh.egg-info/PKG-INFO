@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: skyhigh
+Version: 0.1.0
+Summary: SkyHigh Core - backend services for seat management and check-in
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: psycopg2-binary<3.0.0,>=2.9.9
+Requires-Dist: redis<6.0.0,>=5.0.1
+Requires-Dist: fastapi<1.0.0,>=0.115.0
+Requires-Dist: uvicorn[standard]<1.0.0,>=0.30.0
+Provides-Extra: dev
+Requires-Dist: pytest<9.0.0,>=8.1.1; extra == "dev"
+
+# skyhigh
+A flight reservation system that features safe bookings at scale

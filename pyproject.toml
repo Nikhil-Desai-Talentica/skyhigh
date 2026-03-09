@@ -1,0 +1,29 @@
+[project]
+name = "skyhigh"
+version = "0.1.0"
+description = "SkyHigh Core - backend services for seat management and check-in"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "psycopg2-binary>=2.9.9,<3.0.0",
+    "redis>=5.0.1,<6.0.0",
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.30.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.1.1,<9.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["skyhigh_core*"]
+
+[tool.uv]
+package = true
+

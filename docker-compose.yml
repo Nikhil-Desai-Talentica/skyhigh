@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: skyhigh-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: skyhigh
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    container_name: skyhigh-redis
+    ports:
+      - "6379:6379"
+
+  seat-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.seat
+    container_name: seat-service
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/skyhigh
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+
+  baggage-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.baggage
+    container_name: baggage-service
+    ports:
+      - "8001:8001"
+
+  reservation-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.reservation
+    container_name: reservation-service
+    ports:
+      - "8002:8002"
+
